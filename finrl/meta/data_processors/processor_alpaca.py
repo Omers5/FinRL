@@ -1,34 +1,43 @@
-from __future__ import annotations
-
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ThreadPoolExecutor
 
-import alpaca_trade_api as tradeapi
+#import alpaca_trade_api as tradeapi
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+
 import exchange_calendars as tc
 import numpy as np
 import pandas as pd
 import pytz
 from stockstats import StockDataFrame as Sdf
-
+from datetime import timedelta as td
+from datetime import datetime
 
 class AlpacaProcessor:
-    def __init__(self, API_KEY=None, API_SECRET=None, API_BASE_URL=None, api=None):
-        if api is None:
+    def __init__(self, API_KEY=None, API_SECRET=None, API_BASE_URL=None, client=None):
+        if client is None:
             try:
-                self.api = tradeapi.REST(API_KEY, API_SECRET, API_BASE_URL, "v2")
+                #self.api = tradeapi.REST(API_KEY, API_SECRET, API_BASE_URL, "v2")
+                self.client = StockHistoricalDataClient(API_KEY, API_SECRET)
             except BaseException:
                 raise ValueError("Wrong Account Info!")
         else:
-            self.api = api
+            self.client = client
 
     def _fetch_data_for_ticker(self, ticker, start_date, end_date, time_interval):
-        bars = self.api.get_bars(
-            ticker,
-            time_interval,
-            start=start_date.isoformat(),
-            end=end_date.isoformat(),
-        ).df
-        bars["symbol"] = ticker
+        # Convert string dates to datetime objects
+        #start = pytz.timezone('America/New_York').localize(datetime.strptime(start_date.strftime('%Y-%m-%d'), '%Y-%m-%d')).strftime('%Y-%m-%dT%H:%M:%SZ')
+        #end = pytz.timezone('America/New_York').localize(datetime.strptime(end_date.strftime('%Y-%m-%d'), '%Y-%m-%d')).strftime('%Y-%m-%dT%H:%M:%SZ')
+        #start = start_date.astimezone(pytz.timezone('America/New_York')).isoformat()
+        #end = end_date.astimezone(pytz.timezone('America/New_York')).isoformat()
+        request_params = StockBarsRequest(symbol_or_symbols=ticker,
+                                          timeframe = TimeFrame.Minute,
+                                          start = start_date,
+                                          end = end_date)
+        bars = self.client.get_stock_bars(request_params).df
+        #all_bars["symbol"] = ticker
+        
         return bars
 
     def download_data(
@@ -53,7 +62,7 @@ class AlpacaProcessor:
         NY = "America/New_York"
         start_date = pd.Timestamp(start_date + " 09:30:00", tz=NY)
         end_date = pd.Timestamp(end_date + " 15:59:00", tz=NY)
-
+        data_list = []
         # Use ThreadPoolExecutor to fetch data for multiple tickers concurrently
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [
@@ -66,11 +75,51 @@ class AlpacaProcessor:
                 )
                 for ticker in ticker_list
             ]
-            data_list = [future.result() for future in futures]
+            #data_list = [future.result() for future in futures]
+        for future in futures:
+            
+            bars = future.result()
+            #fix start
+            # Reorganize the dataframes to be in original alpaca_trade_api structure
+            # Rename the existing 'symbol' column if it exists
+            if not bars.empty:
+                #if 'symbol' in bars.columns:
+                #    bars.rename(columns={'symbol': 'symbol_old'}, inplace=True)
+                
+                # Now reset the index
+                bars.reset_index(inplace=True)
+                
+                # Set 'timestamp' as the new index
+                #print(data_df.columns)
+                #print(data_df.info)
+                if 'level_1' in bars.columns:
+                    bars.rename(columns={'level_1': 'timestamp'}, inplace=True)
+                if 'level_0' in bars.columns:
+                    bars.rename(columns={'level_0': 'symbol'}, inplace=True)
+                #print(bars.columns)
+                #print(bars.head(2))
+                bars.set_index('timestamp', inplace=True)
+                
+                # Reorder and rename columns as needed
+                bars = bars[['close', 'high', 'low', 'trade_count', 'open', 'volume', 'vwap', 'symbol']]
+                
+                # Convert data types
+                #data_df['trade_count'] = data_df['trade_count'].astype('int64')
+                #data_df['volume'] = data_df['volume'].astype('int64')
+                #unique_symbols = bars['symbol'].unique()
+                #print("Symbols in the DataFrame:", unique_symbols)
+                #print(bars.head(2))
+                #print(bars.tail(2))
+                # fix end
+                
+                data_list.append(bars)
+            else:
+                print("empty")
+            
 
         # Combine the data
         data_df = pd.concat(data_list, axis=0)
-
+        
         # Convert the timezone
         data_df = data_df.tz_convert(NY)
 
@@ -371,7 +420,40 @@ class AlpacaProcessor:
     ) -> pd.DataFrame:
         data_df = pd.DataFrame()
         for tic in ticker_list:
-            barset = self.api.get_bars([tic], time_interval, limit=limit).df  # [tic]
+            request_params = StockBarsRequest(symbol_or_symbols=[tic],
+                                              timeframe = TimeFrame.Minute,
+                                              limit = limit)
+            
+            barset = self.client.get_stock_bars(request_params).df
+            #barset = self.api.get_bars([tic], time_interval, limit=limit).df  # [tic]
+            #fix start
+            # Reorganize the dataframes to be in original alpaca_trade_api structure
+            # Rename the existing 'symbol' column if it exists
+            if 'symbol' in barset.columns:
+                barset.rename(columns={'symbol': 'symbol_old'}, inplace=True)
+            
+            # Now reset the index
+            barset.reset_index(inplace=True)
+            
+            # Set 'timestamp' as the new index
+            #print(data_df.columns)
+            #print(data_df.info)
+            if 'level_0' in barset.columns:
+                barset.rename(columns={'level_0': 'symbol'}, inplace=True)
+            if 'level_1' in bars.columns:
+                barset.rename(columns={'level_1': 'timestamp'}, inplace=True)
+            #print(bars.columns)
+            #print(bars.head(1))
+            barset.set_index('timestamp', inplace=True)
+            
+            # Reorder and rename columns as needed
+            barset = bars[['close', 'high', 'low', 'trade_count', 'open', 'volume', 'vwap', 'symbol']]
+            
+            # Convert data types
+            #data_df['trade_count'] = data_df['trade_count'].astype('int64')
+            #data_df['volume'] = data_df['volume'].astype('int64')
+            # fix end
+            
             barset["tic"] = tic
             barset = barset.reset_index()
             data_df = pd.concat([data_df, barset])
@@ -451,6 +533,10 @@ class AlpacaProcessor:
         )
         latest_price = price_array[-1]
         latest_tech = tech_array[-1]
-        turb_df = self.api.get_bars(["VIXY"], time_interval, limit=1).df
+        request_params = StockBarsRequest(symbol_or_symbols="VIXY",
+                                          timeframe = TimeFrame.Minute,
+                                         limit = 1)
+        turb_df = self.client.get_stock_bars(request_params).df
+        #turb_df = self.api.get_bars(["VIXY"], time_interval, limit=1).df
         latest_turb = turb_df["close"].values
         return latest_price, latest_tech, latest_turb
